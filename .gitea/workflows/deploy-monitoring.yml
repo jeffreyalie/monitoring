@@ -1,0 +1,110 @@
+name: Deploy kube-prometheus-stack
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'helm/kube-prometheus-stack/**'
+  workflow_dispatch:        # manual trigger from Gitea UI
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    env:
+      VAULT_ADDR:      ${{ secrets.VAULT_ADDR }}
+      VAULT_ROLE_ID:   ${{ secrets.VAULT_ROLE_ID }}
+      VAULT_SECRET_ID: ${{ secrets.VAULT_SECRET_ID }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── Tool Setup ──────────────────────────────────────────────────────────
+
+      - name: Install jq (if not present)
+        run: |
+          if ! command -v jq &>/dev/null; then
+            apt-get update -qq && apt-get install -y -qq jq
+          fi
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: 'v3.16.4'
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+
+      # ── OpenBao: AppRole Login ───────────────────────────────────────────────
+
+      - name: Login to OpenBao (AppRole)
+        run: |
+          VAULT_TOKEN=$(curl -sk -X POST "${VAULT_ADDR}/v1/auth/approle/login" \
+            -H "Content-Type: application/json" \
+            -d "{\"role_id\":\"${VAULT_ROLE_ID}\",\"secret_id\":\"${VAULT_SECRET_ID}\"}" \
+            | jq -r '.auth.client_token')
+          echo "::add-mask::${VAULT_TOKEN}"
+          echo "VAULT_TOKEN=${VAULT_TOKEN}" >> $GITHUB_ENV
+
+      # ── OpenBao: Fetch Secrets ───────────────────────────────────────────────
+
+      - name: Fetch kubeconfig from OpenBao
+        run: |
+          SECRET=$(curl -sk \
+            -H "X-Vault-Token: ${VAULT_TOKEN}" \
+            "${VAULT_ADDR}/v1/homelab/data/microk8s")
+
+          KUBECONFIG_DATA=$(echo "$SECRET" | jq -r '.data.data.kubeconfig')
+          mkdir -p ~/.kube
+          echo "${KUBECONFIG_DATA}" > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Fetch Grafana admin password from OpenBao
+        run: |
+          SECRET=$(curl -sk \
+            -H "X-Vault-Token: ${VAULT_TOKEN}" \
+            "${VAULT_ADDR}/v1/homelab/data/grafana")
+
+          GRAFANA_PASS=$(echo "$SECRET" | jq -r '.data.data.admin_password')
+          echo "::add-mask::${GRAFANA_PASS}"
+          echo "GRAFANA_ADMIN_PASSWORD=${GRAFANA_PASS}" >> $GITHUB_ENV
+
+      # ── Sanity check ────────────────────────────────────────────────────────
+
+      - name: Verify cluster access
+        run: kubectl cluster-info
+
+      # ── Helm Deploy ─────────────────────────────────────────────────────────
+
+      - name: Add prometheus-community Helm repo
+        run: |
+          helm repo add prometheus-community \
+            https://prometheus-community.github.io/helm-charts
+          helm repo update
+
+      - name: Create monitoring namespace
+        run: kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Deploy kube-prometheus-stack
+        run: |
+          helm upgrade --install kube-prometheus-stack \
+            prometheus-community/kube-prometheus-stack \
+            --namespace monitoring \
+            --values helm/kube-prometheus-stack/values.yaml \
+            --set grafana.adminPassword="${GRAFANA_ADMIN_PASSWORD}" \
+            --wait \
+            --timeout 15m
+
+      # ── Post-deploy Info ────────────────────────────────────────────────────
+
+      - name: Show deployed resources
+        if: always()
+        run: |
+          echo "=== Pods ==="
+          kubectl get pods -n monitoring
+          echo ""
+          echo "=== Services ==="
+          kubectl get svc -n monitoring
+          echo ""
+          echo "=== PVCs ==="
+          kubectl get pvc -n monitoring

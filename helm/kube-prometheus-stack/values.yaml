@@ -1,0 +1,247 @@
+# ============================================================================
+# kube-prometheus-stack — values.yaml
+# Target: MicroK8s single-node
+# Storage class: microk8s-hostpath (default MicroK8s provisioner)
+# Admin password: injected by GHA workflow via --set (from OpenBao)
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# PROMETHEUS OPERATOR
+# ----------------------------------------------------------------------------
+prometheusOperator:
+  enabled: true
+
+  # MicroK8s specific: the operator needs to watch the right namespace
+  namespaces:
+    releaseNamespace: true
+
+# ----------------------------------------------------------------------------
+# PROMETHEUS
+# ----------------------------------------------------------------------------
+prometheus:
+  enabled: true
+
+  prometheusSpec:
+    # Retention period — 15 days is a good default for a homelab
+    retention: 15d
+    retentionSize: ""          # rely on time-based retention
+
+    # Scrape interval
+    scrapeInterval: "30s"
+    evaluationInterval: "30s"
+
+    # Allow Prometheus to scrape ServiceMonitors from ALL namespaces
+    # (required so your Go app's ServiceMonitor in a different ns is picked up)
+    serviceMonitorNamespaceSelector: {}
+    serviceMonitorSelector: {}
+    podMonitorNamespaceSelector: {}
+    podMonitorSelector: {}
+    ruleNamespaceSelector: {}
+
+    # Persistent storage on microk8s-hostpath
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: microk8s-hostpath
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 10Gi
+
+    # Resource limits — tune to your MicroK8s node capacity
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        cpu: 1000m
+        memory: 2Gi
+
+  service:
+    type: NodePort
+    nodePort: 30090          # http://microk8s-node-ip:30090
+
+# ----------------------------------------------------------------------------
+# ALERTMANAGER
+# ----------------------------------------------------------------------------
+alertmanager:
+  enabled: true
+
+  alertmanagerSpec:
+    storage:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: microk8s-hostpath
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 2Gi
+
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+
+  service:
+    type: NodePort
+    nodePort: 30093          # http://microk8s-node-ip:30093
+
+  # Basic alertmanager config — edit once you set up receivers (email/Slack/etc.)
+  config:
+    global:
+      resolve_timeout: 5m
+    route:
+      group_by: ['namespace', 'alertname']
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 12h
+      receiver: 'null'
+    receivers:
+      - name: 'null'          # silently swallow all alerts for now
+    inhibit_rules:
+      - source_matchers:
+          - severity = critical
+        target_matchers:
+          - severity =~ warning|info
+        equal: [namespace, alertname]
+
+# ----------------------------------------------------------------------------
+# GRAFANA
+# ----------------------------------------------------------------------------
+grafana:
+  enabled: true
+
+  initChownData:
+    enabled: false       # ← add this
+
+  # adminPassword is injected by workflow via --set grafana.adminPassword=...
+  # DO NOT hardcode here — leave blank so --set wins
+  adminPassword: ""
+
+  persistence:
+    enabled: true
+    storageClassName: microk8s-hostpath
+    size: 5Gi
+
+  service:
+    type: NodePort
+    nodePort: 30300          # http://microk8s-node-ip:30300
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  # Grafana default dashboards — keep enabled so you get Kubernetes dashboards
+  # out of the box. Your Go app dashboard will be added here later.
+  defaultDashboardsEnabled: true
+  defaultDashboardsTimezone: browser
+
+  # Extra data sources — leave empty for now, Prometheus is auto-wired
+  additionalDataSources: []
+
+  # Grafana INI overrides
+  grafana.ini:
+    server:
+      root_url: "http://grafana.local"
+    analytics:
+      check_for_updates: false
+    security:
+      allow_embedding: true       # needed for iframe embedding later
+
+# ----------------------------------------------------------------------------
+# KUBE STATE METRICS
+# Scrapes k8s object state (deployments, pods, PVCs, etc.)
+# ----------------------------------------------------------------------------
+kube-state-metrics:
+  enabled: true
+
+# ----------------------------------------------------------------------------
+# NODE EXPORTER
+# Scrapes host-level metrics (CPU, memory, disk, network)
+# ----------------------------------------------------------------------------
+nodeExporter:
+  enabled: true
+
+prometheus-node-exporter:
+  tolerations:
+    # Allow node-exporter to run on ALL nodes including control-plane
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
+
+# ----------------------------------------------------------------------------
+# MICROK8S SPECIFIC — Disable built-in component scrapers
+#
+# MicroK8s runs kube-scheduler, kube-controller-manager, and kube-proxy
+# as processes (not pods with discoverable endpoints), so the chart's default
+# ServiceMonitors for these will fail to scrape and create dead endpoints.
+# Disable them to avoid false "target down" alerts.
+# ----------------------------------------------------------------------------
+kubeScheduler:
+  enabled: false
+
+kubeControllerManager:
+  enabled: false
+
+kubeProxy:
+  enabled: false
+
+# kubeEtcd — MicroK8s uses dqlite, not etcd
+kubeEtcd:
+  enabled: false
+
+# Keep these enabled — they work fine on MicroK8s
+kubeApiServer:
+  enabled: true
+
+kubelet:
+  enabled: true
+  serviceMonitor:
+    # MicroK8s exposes kubelet on the standard port
+    https: true
+
+coreDns:
+  enabled: true
+
+# ----------------------------------------------------------------------------
+# DEFAULT ALERT RULES
+# The chart ships with ~100 pre-built PrometheusRules.
+# Disable the ones that fire on a single-node cluster unnecessarily.
+# ----------------------------------------------------------------------------
+defaultRules:
+  create: true
+  rules:
+    # Disable multi-node HA rules that fire on a single-node cluster
+    etcd: false                   # we disabled kubeEtcd above
+    kubeScheduler: false
+    kubeControllerManager: false
+    kubeProxy: false
+    # Keep everything else enabled
+    alertmanager: true
+    configReloaders: true
+    general: true
+    k8sContainerCpuUsageSecondsTotal: true
+    k8sContainerMemoryCache: true
+    kubeApiserverAvailability: true
+    kubeApiserverBurnrate: true
+    kubeApiserverHistogram: true
+    kubeApiserverSlos: true
+    kubeStateMetrics: true
+    kubelet: true
+    kubernetesApps: true
+    kubernetesResources: true
+    kubernetesStorage: true
+    kubernetesSystem: true
+    network: true
+    node: true
+    nodeExporterAlerting: true
+    nodeExporterRecording: true
+    prometheus: true
+    prometheusOperator: true
