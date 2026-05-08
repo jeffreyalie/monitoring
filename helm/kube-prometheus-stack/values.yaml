@@ -144,16 +144,28 @@ grafana:
   defaultDashboardsTimezone: browser
 
   # Extra data sources — leave empty for now, Prometheus is auto-wired
-  additionalDataSources: []
+  # datasources:
+  #   enabled: true
+  #   skipTlsVerify: true      # ← add this
 
   # Grafana INI overrides
   grafana.ini:
     server:
       root_url: "http://grafana.local"
     analytics:
-      check_for_updates: false
+      check_for_updates: false  # disable update check since this is offline
     security:
-      allow_embedding: true       # needed for iframe embedding later
+      allow_embedding: true   # allow iframes for Grafana dashboards in other apps
+  
+  # Sidecar for dashboards — this watches for ConfigMaps with label grafana_dashboard=1 and auto-imports them as Grafana dashboards.
+  sidecar:
+    dashboards:
+      enabled: true
+      searchNamespace: ALL  # watch all namespaces
+      label: grafana_dashboard
+      labelValue: "1"
+    
+    skipTlsVerify: true
 
 # ----------------------------------------------------------------------------
 # KUBE STATE METRICS
